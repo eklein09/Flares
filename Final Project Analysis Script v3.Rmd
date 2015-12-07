@@ -1,0 +1,259 @@
+---
+title: "Final Project Analysis Script v2"
+author: "Ken Fenton, Eric Klein, Dave Lewis, Rob Patenge"
+date: "November 28, 2015"
+output: pdf_document
+---
+
+```{r, echo=FALSE, include=FALSE}
+
+#load libraries and data frame
+library(randomForest)
+library(gamlr)
+library(ggplot2)
+library(data.table)
+library(h2o)
+
+#setwd("/Users/Dave/Google Drive/Booth Academics") ###update for your machine
+flares_temp <- fread("1996_2014_data.csv")
+flares <- flares_temp[-23310,] #adjustment for data integrity issue; remove later
+
+#set factor variables
+flares <- flares[, Classification_Modified_Zurich := factor(Classification_Modified_Zurich)]
+flares <- flares[, p_value := factor(p_value)]
+flares <- flares[, c_value := factor(c_value)]
+flares <- flares[, Magnetic_type := factor(Magnetic_type)]
+
+#assign threshold condition for Flare Intensity then convert to factor
+flares <- flares[, Flare_Intensity := ifelse(Flare_Intensity>0,1,0)]
+flares <- flares[, Flare_Intensity :=  factor(Flare_Intensity,levels=c(0,1),labels=c("no_flare","flare"))]
+
+sapply(flares, class) #sanity check
+```
+
+```{r, echo=FALSE, include=FALSE}
+
+# configure h2o; break data into training and test
+h2o <- h2o.init(nthreads = -1)
+flares.hex <- as.h2o(flares, destination_frame = "flares.hex")
+
+flares.split <- h2o.splitFrame(data = flares.hex,
+                ratios = 0.8)
+flares.training <- flares.split[[1]]
+flares.test <- flares.split[[2]]
+rm(flares.split)
+
+#define x variables
+x_vars <- c(6:17)
+
+```
+
+##Gradient Boosting Machines
+
+```{r, echo=FALSE, include=FALSE}
+
+flares.gbm <- h2o.gbm(y=1, x=x_vars, 
+                         training_frame=flares.training, 
+                         ntrees=200,
+                         #max_depth = 5,
+                         min_rows = 2,
+                         learn_rate = 0.2,
+                         distribution = "bernoulli")
+```
+
+```{r, echo=FALSE}
+flares.gbm@model$training_metrics
+```
+
+```{r}
+flares.gbm@model$variable_importances
+```
+
+
+##Random Forests
+
+```{r, echo=FALSE, include=FALSE}
+flares.rf <- h2o.randomForest(y=1, x=x_vars, 
+                         training_frame=flares.training,
+                         ntrees = 100)
+```
+
+```{r, echo=FALSE}
+flares.rf@model$training_metrics
+```
+
+##Model Plots
+
+```{r, echo=FALSE, fig.width=7, fig.height=6}
+
+flares.gbm.performance <- h2o.performance(model=flares.gbm, 
+                data=flares.test)@metrics$thresholds_and_metric_scores
+
+flares.rf.performance <- h2o.performance(model=flares.rf, 
+                data=flares.test)@metrics$thresholds_and_metric_scores
+
+  
+ggplot(data = flares.gbm.performance, aes(x=fpr, y= tpr, colour="gbm")) + 
+    geom_point(shape=1) +
+    geom_point(data = flares.rf.performance, aes(x=fpr, y= tpr, colour="rf")) +
+    scale_colour_manual(values = c("gbm"="red", "rf" = "green")) +
+    ggtitle("Predictive Performance of Solar Flare Models")
+
+```
+
+##Deep Learning
+
+#Default Model (Rectifier activation function, 2x200 hidden layers, no regularization, 1 epoch)
+
+```{r, echo=TRUE, include = FALSE}
+flares.dl <- h2o.deeplearning(
+  y=1,
+  x=x_vars,
+  epochs=1, 
+  hidden = c(200,200),
+  training_frame = flares.training)
+
+flares.dl.performance <- h2o.performance(model = flares.dl, data = flares.test)
+
+```
+
+```{r}
+flares.dl.performance@metrics$r2
+flares.dl.performance@metrics$MSE
+flares.dl.performance@metrics$logloss
+```
+
+#Tanh activation function
+
+```{r, echo=FALSE, include=FALSE}
+flares.dl2 <- h2o.deeplearning(
+  y=1,
+  x=x_vars,
+  epochs=1, 
+  hidden = c(200,200),
+  activation = "Tanh",
+  training_frame = flares.training)
+
+flares.dl2.performance <- h2o.performance(model = flares.dl2, data = flares.test)
+
+```
+
+```{r}
+flares.dl2.performance@metrics$r2
+flares.dl2.performance@metrics$MSE
+flares.dl2.performance@metrics$logloss
+```
+
+#Tanh with dropout
+
+```{r, echo=FALSE, include=FALSE}
+flares.dl3 <- h2o.deeplearning(
+  y=1,
+  x=x_vars,
+  epochs=1, 
+  hidden = c(200,200),
+  activation = "TanhWithDropout",
+  training_frame = flares.training)
+
+flares.dl3.performance <- h2o.performance(model = flares.dl3, data = flares.test)
+
+```
+
+```{r}
+flares.dl3.performance@metrics$r2
+flares.dl3.performance@metrics$MSE
+flares.dl3.performance@metrics$logloss
+```
+
+#Three 100-node hidden layers
+
+Next we see if we can improve performance by using a different series of hidden nodes.
+
+```{r, echo=FALSE, include=FALSE}
+flares.dl4 <- h2o.deeplearning(
+  y=1,
+  x=x_vars,
+  epochs=1, 
+  hidden = c(100,100,100),
+  activation = "TanhWithDropout",
+  training_frame = flares.training)
+
+flares.dl4.performance <- h2o.performance(model = flares.dl4, data = flares.test)
+
+```
+
+```{r}
+flares.dl4.performance@metrics$r2
+flares.dl4.performance@metrics$MSE
+flares.dl4.performance@metrics$logloss
+```
+
+#4 hidden layers of decreasing size
+
+```{r, echo=FALSE, include = FALSE}
+flares.dl5 <- h2o.deeplearning(
+  y=1,
+  x=x_vars,
+  epochs=1, 
+  hidden = c(256,128,64,32),
+  activation = "TanhWithDropout",
+  training_frame = flares.training)
+
+flares.dl5.performance <- h2o.performance(model = flares.dl5, data = flares.test)
+
+```
+
+```{r}
+flares.dl5.performance@metrics$r2
+flares.dl5.performance@metrics$MSE
+flares.dl5.performance@metrics$logloss
+```
+
+
+#Two 300-node hidden layers
+
+We next shift back to two hidden layers and optimize the number of nodes in the hidden layer.
+
+
+```{r, echo=FALSE, include=FALSE}
+flares.dl6 <- h2o.deeplearning(
+  y=1,
+  x=x_vars,
+  epochs=1, 
+  hidden = c(300,300),
+  activation = "TanhWithDropout",
+  training_frame = flares.training)
+
+flares.dl6.performance <- h2o.performance(model = flares.dl6, data = flares.test)
+
+```
+
+```{r}
+flares.dl6.performance@metrics$r2
+flares.dl6.performance@metrics$MSE
+flares.dl6.performance@metrics$logloss
+```
+
+#10 epochs
+
+Finally, we increase the number of epochs and see if performance improves.
+
+```{r, echo=FALSE, include=FALSE}
+flares.dl7 <- h2o.deeplearning(
+  y=1,
+  x=x_vars,
+  epochs=10, 
+  hidden = c(200,200),
+  activation = "TanhWithDropout",
+  training_frame = flares.training)
+
+flares.dl7.performance <- h2o.performance(model = flares.dl7, data = flares.test)
+
+```
+
+```{r}
+flares.dl7.performance@metrics$r2
+flares.dl7.performance@metrics$MSE
+flares.dl7.performance@metrics$logloss
+```
+
