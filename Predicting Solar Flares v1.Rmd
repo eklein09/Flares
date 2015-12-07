@@ -1,9 +1,19 @@
 ---
-title: "Final Project Analysis Script v2"
+title: "Predicting Solar Flares from Sunspot Data"
 author: "Ken Fenton, Eric Klein, Dave Lewis, Rob Patenge"
 date: "November 28, 2015"
 output: pdf_document
 ---
+
+#Introduction and Motivation
+
+In this paper, we use Machine Learning tools to develop a model for predicting solar flares using sunspot data. Solar flares strongly influence space weather in the vicinity of Earth, and can result in the production of high-energy particles - called a solar proton event - that can present radiation hazards to spacecraft and astronauts. X-rays and UV radiation from solar flares can also disrupt long-range radio communications and disturb the operation of radars and satellites. Therefore, it would be useful to predict solar flares at some point before the flare occurs (1).
+
+**Data Set:** We began with two data sets (sunspot info and solar flare info) collected from the GOES Satellite Network ranging from 1996 through 2014.  The sunspot data included date, sunspot number, location, area, classification, longitudinal extent, number of spots, and magnetic classification.  The solar flare data included date, sunspot number the flare originated from, and flare intensity.  There are 21,778 sunspot observations to be matched against 13,203 C Class flares, 1,443 M Class flares, and 126 X class flares. We cleaned the data and joined the two sets (on the sunspot number) to consolidate into a single data set.
+
+In the analysis below, we apply Gradient Boosting Machines, Random Forests, and several Deep Learning algorithms to develop a prediction model for solar flares based on the historical then. In addition, we added time series data (ROB - CAN YOU ELABORATE ON HOW YOU DID THIS?) to the basic data set and conducted further analysis in order to see if the data from a prior day improves our ability to predict a solar flare on the current day.
+
+#Part I: Analysis without Time Series Data
 
 ```{r, echo=FALSE, include=FALSE}
 
@@ -14,9 +24,12 @@ library(ggplot2)
 library(data.table)
 library(h2o)
 
-#setwd("/Users/Dave/Google Drive/Booth Academics") ###update for your machine
+h2o.init
+#update working directory for your machine
+setwd("/Users/Dave/Google Drive/Booth Academics")
 flares_temp <- fread("1996_2014_data.csv")
-flares <- flares_temp[-23310,] #adjustment for data integrity issue; remove later
+
+flares <- flares_temp[, Sunspot_ID := NULL]
 
 #set factor variables
 flares <- flares[, Classification_Modified_Zurich := factor(Classification_Modified_Zurich)]
@@ -24,11 +37,291 @@ flares <- flares[, p_value := factor(p_value)]
 flares <- flares[, c_value := factor(c_value)]
 flares <- flares[, Magnetic_type := factor(Magnetic_type)]
 
-#assign threshold condition for Flare Intensity then convert to factor
-flares <- flares[, Flare_Intensity := ifelse(Flare_Intensity>0,1,0)]
-flares <- flares[, Flare_Intensity :=  factor(Flare_Intensity,levels=c(0,1),labels=c("no_flare","flare"))]
+#assign threshold condition for Flare Intensity
+flares <- flares[, isFlarePositive := Flare_Intensity>0 ]
 
-sapply(flares, class) #sanity check
+```
+
+```{r, echo=FALSE, include=FALSE}
+
+#configure h2o; break data into training and test
+h2o <- h2o.init(nthreads = -1)
+flares.hex <- as.h2o(flares, destination_frame = "flares.hex")
+
+flares.split <- h2o.splitFrame(data = flares.hex,
+                ratios = 0.8)
+flares.training <- flares.split[[1]]
+flares.test <- flares.split[[2]]
+rm(flares.split)
+
+#define x variables
+x_vars <- setdiff(colnames(flares.hex), c("Flare_Intensity","isFlarePositive"))
+```
+
+##Gradient Boosting Machines
+
+```{r, echo=FALSE, include=FALSE}
+
+flares.gbm <- h2o.gbm(y="isFlarePositive",
+                      x=x_vars,
+                         training_frame=flares.training,
+                         ntrees = 100,
+                         max_depth = 5,
+                         min_rows = 10,
+                         learn_rate = 0.1,
+                         distribution = "bernoulli")
+```
+
+```{r, echo=FALSE}
+flares.gbm@model$training_metrics
+```
+
+##Random Forests
+
+```{r, echo=FALSE, include=FALSE}
+flares.rf <- h2o.randomForest(y="isFlarePositive",
+                      x=x_vars,
+                         training_frame=flares.training,
+                         ntrees = 100)
+```
+
+```{r, echo=FALSE}
+flares.rf@model$training_metrics
+```
+
+We see that GBM provides better performance, with an AUC of 0.91.
+
+##Model Plots
+
+```{r, echo=FALSE, fig.width=7, fig.height=6}
+
+flares.gbm.performance <- h2o.performance(model=flares.gbm,
+                data=flares.test)@metrics$thresholds_and_metric_scores
+
+flares.rf.performance <- h2o.performance(model=flares.rf,
+                data=flares.test)@metrics$thresholds_and_metric_scores
+
+
+ggplot(data = flares.gbm.performance, aes(x=fpr, y= tpr, colour="gbm")) +
+  geom_point(shape=1) +
+geom_point(data = flares.rf.performance, aes(x=fpr, y= tpr, colour="rf")) +
+  scale_colour_manual(values = c("gbm"="red", "rf" = "green")) + ggtitle("Predictive Performance of Solar Flare Models\nwithout Lagged Data")
+
+```
+
+##Variable Importance
+
+```{r, echo=FALSE}
+flares.gbm@model$variable_importances
+flares.rf@model$variable_importances
+```
+
+Unsurprisingly, we see that the Modified Zurich Classification is the most predictive variable. This makes sense from a physics standpoint because (KEN - CAN YOU ELABORATE?)
+
+##Deep Learning
+
+We now try several iterations of Deep Learning models with varying parameters.
+
+###Default Model (Rectifier activation function, 2x200 hidden layers, no regularization, 1 epoch)
+
+```{r, echo=TRUE, include = FALSE}
+flares.dl <- h2o.deeplearning(
+  y="isFlarePositive",
+  x=x_vars,
+  epochs=1,
+  hidden = c(200,200),
+  training_frame = flares.training)
+
+flares.dl.performance <- h2o.performance(model = flares.dl, data = flares.test)
+
+```
+
+```{r}
+flares.dl.performance@metrics$r2
+flares.dl.performance@metrics$MSE
+flares.dl.performance@metrics$logloss
+```
+
+###Tanh activation function
+
+```{r, echo=FALSE, include=FALSE}
+flares.dl2 <- h2o.deeplearning(
+  y="isFlarePositive",
+  x=x_vars,
+  epochs=1,
+  hidden = c(200,200),
+  activation = "Tanh",
+  training_frame = flares.training)
+
+flares.dl2.performance <- h2o.performance(model = flares.dl2, data = flares.test)
+
+```
+
+```{r}
+flares.dl2.performance@metrics$r2
+flares.dl2.performance@metrics$MSE
+flares.dl2.performance@metrics$logloss
+```
+
+###Tanh with dropout
+
+```{r, echo=FALSE, include=FALSE}
+flares.dl3 <- h2o.deeplearning(
+  y="isFlarePositive",
+  x=x_vars,
+  epochs=1,
+  hidden = c(200,200),
+  activation = "TanhWithDropout",
+  training_frame = flares.training)
+
+flares.dl3.performance <- h2o.performance(model = flares.dl3, data = flares.test)
+
+```
+
+```{r}
+flares.dl3.performance@metrics$r2
+flares.dl3.performance@metrics$MSE
+flares.dl3.performance@metrics$logloss
+```
+
+###Three 100-node hidden layers
+
+Next we see if we can improve performance by using a different series of hidden nodes.
+
+```{r, echo=FALSE, include=FALSE}
+flares.dl4 <- h2o.deeplearning(
+  y="isFlarePositive",
+  x=x_vars,
+  epochs=1,
+  hidden = c(100,100,100),
+  activation = "Tanh",
+  training_frame = flares.training)
+
+flares.dl4.performance <- h2o.performance(model = flares.dl4, data = flares.test)
+
+```
+
+```{r}
+flares.dl4.performance@metrics$r2
+flares.dl4.performance@metrics$MSE
+flares.dl4.performance@metrics$logloss
+```
+
+###4 hidden layers of decreasing size
+
+```{r, echo=FALSE, include = FALSE}
+flares.dl5 <- h2o.deeplearning(
+  y="isFlarePositive",
+  x=x_vars,
+  epochs=1,
+  hidden = c(256,128,64,32),
+  activation = "Tanh",
+  training_frame = flares.training)
+
+flares.dl5.performance <- h2o.performance(model = flares.dl5, data = flares.test)
+
+```
+
+```{r}
+flares.dl5.performance@metrics$r2
+flares.dl5.performance@metrics$MSE
+flares.dl5.performance@metrics$logloss
+```
+
+
+###Two 300-node hidden layers
+
+We next shift back to two hidden layers and optimize the number of nodes in the hidden layer.
+
+
+```{r, echo=FALSE, include=FALSE}
+flares.dl6 <- h2o.deeplearning(
+  y="isFlarePositive",
+  x=x_vars,
+  epochs=1,
+  hidden = c(300,300),
+  activation = "Tanh",
+  training_frame = flares.training)
+
+flares.dl6.performance <- h2o.performance(model = flares.dl6, data = flares.test)
+
+```
+
+```{r}
+flares.dl6.performance@metrics$r2
+flares.dl6.performance@metrics$MSE
+flares.dl6.performance@metrics$logloss
+```
+
+###10 epochs
+
+Finally, we increase the number of epochs and see if performance improves.
+
+```{r, echo=FALSE, include=FALSE}
+
+
+if (!file.exists("C:\\Users\\eklein09\\Google Drive Booth\\BUS 41204 Machine Learning\\Final Project\\ml_fp\\DeepLearning_model_R_1448986315368_55")) {
+  flares.dl7 <- h2o.deeplearning(
+  y="isFlarePositive",
+  x=x_vars,
+  epochs=5,
+  hidden = c(300,300),
+  activation = "Tanh",
+  training_frame = flares.training)
+  h2o.saveModel(flares.dl7, path="ml_fp")
+} else {
+  flares.dl7 <- h2o.loadModel("C:\\Users\\eklein09\\Google Drive Booth\\BUS 41204 Machine Learning\\Final Project\\ml_fp\\DeepLearning_model_R_1448986315368_55")
+}
+
+
+flares.dl7.performance <- h2o.performance(model = flares.dl7, data = flares.test)
+
+```
+
+```{r}
+flares.dl7.performance@metrics$r2
+flares.dl7.performance@metrics$MSE
+flares.dl7.performance@metrics$logloss
+```
+
+Deep Learning approaches the performance of GBM but takes much longer to train.
+
+```{r, echo=FALSE}
+flares.gbm.performance <- h2o.performance(model=flares.gbm,
+                data=flares.test)@metrics$thresholds_and_metric_scores
+
+flares.rf.performance <- h2o.performance(model=flares.rf,
+                data=flares.test)@metrics$thresholds_and_metric_scores
+
+flares.dl.performance <- h2o.performance(model=flares.dl7,
+                data=flares.test)@metrics$thresholds_and_metric_scores
+
+ggplot(data = flares.gbm.performance, aes(x=fpr, y= tpr, colour="gbm")) +
+  geom_point(shape=1) +
+geom_point(data = flares.rf.performance, aes(x=fpr, y= tpr, colour="rf")) +
+ geom_point(data = flares.dl.performance, aes(x=fpr, y= tpr, colour="dl")) + 
+  scale_colour_manual(values = c("gbm"="red", "rf" = "green","dl"="blue")) + ggtitle("Predictive Performance of Solar Flare Models\nwithout Lagged Data")
+```
+
+#Part II: Time Series Analysis
+
+```{r, echo=FALSE, include=FALSE}
+
+#update working directory for your machine
+setwd("/Users/Dave/Google Drive/Booth Academics")
+flares_temp <- fread("lagData.csv")
+
+flares <- flares_temp[, Sunspot_ID := NULL]
+
+#set factor variables
+flares <- flares[, Classification_Modified_Zurich := factor(Classification_Modified_Zurich)]
+flares <- flares[, p_value := factor(p_value)]
+flares <- flares[, c_value := factor(c_value)]
+flares <- flares[, Magnetic_type := factor(Magnetic_type)]
+
+#assign threshold condition for Flare Intensity
+flares <- flares[, isFlarePositive := Flare_Intensity>0 ]
+
 ```
 
 ```{r, echo=FALSE, include=FALSE}
@@ -44,7 +337,7 @@ flares.test <- flares.split[[2]]
 rm(flares.split)
 
 #define x variables
-x_vars <- c(6:17)
+x_vars <- setdiff(colnames(flares.hex), c("Flare_Intensity","isFlarePositive"))
 
 ```
 
@@ -52,12 +345,13 @@ x_vars <- c(6:17)
 
 ```{r, echo=FALSE, include=FALSE}
 
-flares.gbm <- h2o.gbm(y=1, x=x_vars, 
-                         training_frame=flares.training, 
-                         ntrees=200,
-                         #max_depth = 5,
-                         min_rows = 2,
-                         learn_rate = 0.2,
+flares.gbm <- h2o.gbm(y="isFlarePositive",
+                      x=x_vars,
+                         training_frame=flares.training,
+                         ntrees = 100,
+                         max_depth = 5,
+                         min_rows = 10,
+                         learn_rate = 0.1,
                          distribution = "bernoulli")
 ```
 
@@ -65,15 +359,11 @@ flares.gbm <- h2o.gbm(y=1, x=x_vars,
 flares.gbm@model$training_metrics
 ```
 
-```{r}
-flares.gbm@model$variable_importances
-```
-
-
 ##Random Forests
 
 ```{r, echo=FALSE, include=FALSE}
-flares.rf <- h2o.randomForest(y=1, x=x_vars, 
+flares.rf <- h2o.randomForest(y="isFlarePositive",
+                      x=x_vars,
                          training_frame=flares.training,
                          ntrees = 100)
 ```
@@ -86,30 +376,42 @@ flares.rf@model$training_metrics
 
 ```{r, echo=FALSE, fig.width=7, fig.height=6}
 
-flares.gbm.performance <- h2o.performance(model=flares.gbm, 
+flares.gbm.performance <- h2o.performance(model=flares.gbm,
                 data=flares.test)@metrics$thresholds_and_metric_scores
 
-flares.rf.performance <- h2o.performance(model=flares.rf, 
+flares.rf.performance <- h2o.performance(model=flares.rf,
                 data=flares.test)@metrics$thresholds_and_metric_scores
 
-  
-ggplot(data = flares.gbm.performance, aes(x=fpr, y= tpr, colour="gbm")) + 
-    geom_point(shape=1) +
-    geom_point(data = flares.rf.performance, aes(x=fpr, y= tpr, colour="rf")) +
-    scale_colour_manual(values = c("gbm"="red", "rf" = "green")) +
-    ggtitle("Predictive Performance of Solar Flare Models")
+
+ggplot(data = flares.gbm.performance, aes(x=fpr, y= tpr, colour="gbm")) +
+  geom_point(shape=1) +
+geom_point(data = flares.rf.performance, aes(x=fpr, y= tpr, colour="rf")) +
+  scale_colour_manual(values = c("gbm"="red", "rf" = "green")) + ggtitle("Predictive Performance of Solar Flare Models\nwith Lagged Data")
 
 ```
 
+Adding time series data provides only a trivial lift in predictive performance, boosting AUC from 0.91 to 0.92.
+
+##Variable Importance
+
+```{r, echo=FALSE}
+flares.gbm@model$variable_importances
+flares.rf@model$variable_importances
+```
+
+Even with the time series data, the Modified Zurich Classification is still the most important variable for prediction, although lagged Flare Intensity data also has significant predictive value and likely accounts for the slight boost in performance.
+
 ##Deep Learning
 
-#Default Model (Rectifier activation function, 2x200 hidden layers, no regularization, 1 epoch)
+Here again, we try several iterations of Deep learning models with the lagged data.
+
+###Default Model (Rectifier activation function, 2x200 hidden layers, no regularization, 1 epoch)
 
 ```{r, echo=TRUE, include = FALSE}
 flares.dl <- h2o.deeplearning(
-  y=1,
+  y="isFlarePositive",
   x=x_vars,
-  epochs=1, 
+  epochs=1,
   hidden = c(200,200),
   training_frame = flares.training)
 
@@ -123,13 +425,13 @@ flares.dl.performance@metrics$MSE
 flares.dl.performance@metrics$logloss
 ```
 
-#Tanh activation function
+###Tanh activation function
 
 ```{r, echo=FALSE, include=FALSE}
 flares.dl2 <- h2o.deeplearning(
-  y=1,
+  y="isFlarePositive",
   x=x_vars,
-  epochs=1, 
+  epochs=1,
   hidden = c(200,200),
   activation = "Tanh",
   training_frame = flares.training)
@@ -144,13 +446,13 @@ flares.dl2.performance@metrics$MSE
 flares.dl2.performance@metrics$logloss
 ```
 
-#Tanh with dropout
+###Tanh with dropout
 
 ```{r, echo=FALSE, include=FALSE}
 flares.dl3 <- h2o.deeplearning(
-  y=1,
+  y="isFlarePositive",
   x=x_vars,
-  epochs=1, 
+  epochs=1,
   hidden = c(200,200),
   activation = "TanhWithDropout",
   training_frame = flares.training)
@@ -165,17 +467,17 @@ flares.dl3.performance@metrics$MSE
 flares.dl3.performance@metrics$logloss
 ```
 
-#Three 100-node hidden layers
+###Three 100-node hidden layers
 
 Next we see if we can improve performance by using a different series of hidden nodes.
 
 ```{r, echo=FALSE, include=FALSE}
 flares.dl4 <- h2o.deeplearning(
-  y=1,
+  y="isFlarePositive",
   x=x_vars,
-  epochs=1, 
+  epochs=1,
   hidden = c(100,100,100),
-  activation = "TanhWithDropout",
+  activation = "Tanh",
   training_frame = flares.training)
 
 flares.dl4.performance <- h2o.performance(model = flares.dl4, data = flares.test)
@@ -188,15 +490,15 @@ flares.dl4.performance@metrics$MSE
 flares.dl4.performance@metrics$logloss
 ```
 
-#4 hidden layers of decreasing size
+###4 hidden layers of decreasing size
 
 ```{r, echo=FALSE, include = FALSE}
 flares.dl5 <- h2o.deeplearning(
-  y=1,
+  y="isFlarePositive",
   x=x_vars,
-  epochs=1, 
+  epochs=1,
   hidden = c(256,128,64,32),
-  activation = "TanhWithDropout",
+  activation = "Tanh",
   training_frame = flares.training)
 
 flares.dl5.performance <- h2o.performance(model = flares.dl5, data = flares.test)
@@ -210,18 +512,18 @@ flares.dl5.performance@metrics$logloss
 ```
 
 
-#Two 300-node hidden layers
+###Two 300-node hidden layers
 
 We next shift back to two hidden layers and optimize the number of nodes in the hidden layer.
 
 
 ```{r, echo=FALSE, include=FALSE}
 flares.dl6 <- h2o.deeplearning(
-  y=1,
+  y="isFlarePositive",
   x=x_vars,
-  epochs=1, 
+  epochs=1,
   hidden = c(300,300),
-  activation = "TanhWithDropout",
+  activation = "Tanh",
   training_frame = flares.training)
 
 flares.dl6.performance <- h2o.performance(model = flares.dl6, data = flares.test)
@@ -234,18 +536,26 @@ flares.dl6.performance@metrics$MSE
 flares.dl6.performance@metrics$logloss
 ```
 
-#10 epochs
+###10 epochs
 
 Finally, we increase the number of epochs and see if performance improves.
 
 ```{r, echo=FALSE, include=FALSE}
-flares.dl7 <- h2o.deeplearning(
-  y=1,
+
+
+if (!file.exists("C:\\Users\\eklein09\\Google Drive Booth\\BUS 41204 Machine Learning\\Final Project\\ml_fp\\DeepLearning_model_R_1448986315368_55")) {
+  flares.dl7 <- h2o.deeplearning(
+  y="isFlarePositive",
   x=x_vars,
-  epochs=10, 
-  hidden = c(200,200),
-  activation = "TanhWithDropout",
+  epochs=5,
+  hidden = c(300,300),
+  activation = "Tanh",
   training_frame = flares.training)
+  h2o.saveModel(flares.dl7, path="ml_fp")
+} else {
+  flares.dl7 <- h2o.loadModel("C:\\Users\\eklein09\\Google Drive Booth\\BUS 41204 Machine Learning\\Final Project\\ml_fp\\DeepLearning_model_R_1448986315368_55")
+}
+
 
 flares.dl7.performance <- h2o.performance(model = flares.dl7, data = flares.test)
 
@@ -257,3 +567,28 @@ flares.dl7.performance@metrics$MSE
 flares.dl7.performance@metrics$logloss
 ```
 
+Once again, Deep Learning approaches the performance of GBM but takes much longer to train.
+
+```{r, echo=FALSE}
+flares.gbm.performance <- h2o.performance(model=flares.gbm,
+                data=flares.test)@metrics$thresholds_and_metric_scores
+
+flares.rf.performance <- h2o.performance(model=flares.rf,
+                data=flares.test)@metrics$thresholds_and_metric_scores
+
+flares.dl.performance <- h2o.performance(model=flares.dl7,
+                data=flares.test)@metrics$thresholds_and_metric_scores
+
+ggplot(data = flares.gbm.performance, aes(x=fpr, y= tpr, colour="gbm")) +
+  geom_point(shape=1) +
+geom_point(data = flares.rf.performance, aes(x=fpr, y= tpr, colour="rf")) +
+ geom_point(data = flares.dl.performance, aes(x=fpr, y= tpr, colour="dl")) + 
+  scale_colour_manual(values = c("gbm"="red", "rf" = "green","dl"="blue")) + ggtitle("Predictive Performance of Solar Flare Models\nwith Lagged Data")
+```
+
+# Conclusion
+
+Our analysis shows that a GBM model provides the best performance for predicting solar flares. We believe this is because... 
+
+--
+(1)  Wikipedia contributors, "Solar flare," Wikipedia, The Free Encyclopedia, https://en.wikipedia.org/w/index.php?title=Solar_flare&oldid=689228024 (accessed November 8, 2015).
